@@ -1,0 +1,8 @@
+{
+  "model_path": "./models/yolov8n.pt",
+  "confidence_threshold": 0.5,
+  "default_fence": [[790, 350], [1100, 350], [1100, 820], [790, 820]],
+  "server_endpoints": ["http://192.168.1.53:9211/cameraMonitoring/intrusionDetection"],
+  "server_endpoints2": ["http://192.168.1.53:9211/cameraMonitoring/safetyHelmetDetection"],
+  "server_endpoints3": ["http://192.168.1.53:9211/cameraMonitoring/crowdGathering"]
+}
