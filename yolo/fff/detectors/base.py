@@ -40,8 +40,8 @@ class BaseDetector:
             self.frame_counter = 0
             self.disappear_counter += 1
 
-        # self.logger.info(f"frame_counter: {self.frame_counter}, disappear_counter: {self.disappear_counter}")
-        print(f"frame_counter: {self.frame_counter}, disappear_counter: {self.disappear_counter}")
+        self.logger.info(f"frame_counter: {self.frame_counter}, disappear_counter: {self.disappear_counter}")
+        # print(f"frame_counter: {self.frame_counter}, disappear_counter: {self.disappear_counter}")
 
         # === 触发事件 ===
         if not self.active and self.frame_counter >= self.min_frames:
