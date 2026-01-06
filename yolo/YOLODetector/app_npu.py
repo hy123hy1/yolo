@@ -80,7 +80,7 @@ TIME_THRESHOLD = 30   # 超员持续秒数
 
 MAX_READ_FAIL = 30        # 连续读取失败多少次认为断流
 RECONNECT_INTERVAL = 5   # 重连间隔（秒）
-MAX_RECONNECT_TIMES = 0  # 0 表示无限重连，>0 表示限制次数
+MAX_RECONNECT_TIMES = 50  # 0 表示无限重连，>0 表示限制次数
 
 # 全局缓存：记录每个摄像头最近一次报警时间
 last_alarm_time = {}
@@ -913,17 +913,33 @@ def start_all_streams(config, fence_lock, algorithm_lock, fence_dict, algorithm_
             daemon=True
         )
         thread.start()
-        # print(f"[INFO] 启动摄像头 {cam_id} 的流")
+
+def safe_open_capture(rtsp_url, retry=3):
+    """更安全的打开 RTSP，带异常捕获"""
+
+    for i in range(retry):
+        try:
+            cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+            if cap.isOpened():
+                return cap
+        except Exception as e:
+            print(f"[ERROR] 打开 RTSP 失败: {e}")
+        time.sleep(1)
+    return None
+    # print(f"[INFO] 启动摄像头 {cam_id} 的流")
 
 def process_stream(camera_id, rtsp_url, config, fence_lock, algorithm_lock, fence_dict, algorithm_dict, latest_pre_frames, ip_address, algorithmtypes):
 
-    def open_capture():
-        cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
-        if not cap.isOpened():
-            return None
-        return cap
-
-    cap = open_capture()
+    # def open_capture():
+    #     cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+    #     if not cap.isOpened():
+    #         return None
+    #     return cap
+    #
+    # cap = open_capture()
+    cap = safe_open_capture(rtsp_url)
+    reconnect_count = 0
+    backoff = RECONNECT_INTERVAL  # 初始重连间隔
 
     if cap is None:
         print(f"[ERROR] 初始无法打开摄像头: {rtsp_url}", flush=True)
@@ -936,18 +952,33 @@ def process_stream(camera_id, rtsp_url, config, fence_lock, algorithm_lock, fenc
     while True:
         # ====== cap 不存在，尝试重连 ======
         if cap is None or not cap.isOpened():
-            if MAX_RECONNECT_TIMES > 0 and reconnect_count >= MAX_RECONNECT_TIMES:
-                print(f"[ERROR] 摄像头 {camera_id} 超过最大重连次数，终止线程", flush=True)
-                break
-
             reconnect_count += 1
-            print(f"[INFO] 摄像头 {camera_id} 尝试第 {reconnect_count} 次重连", flush=True)
-            time.sleep(RECONNECT_INTERVAL)
-            cap = open_capture()
+
+            # 指数退避（最大 30 秒）
+            time.sleep(min(backoff, 30))
+            backoff *= 2
+
+            # 释放旧资源
+            try:
+                if cap:
+                    cap.release()
+            except:
+                pass
+            cap = safe_open_capture(rtsp_url)
+
+            if cap is None:
+                print(f"[ERROR] 摄像头 {camera_id} 重连失败")
+                continue
+            print(f"[INFO] 摄像头 {camera_id} 重连成功")
             read_fail_count = 0
+            backoff = RECONNECT_INTERVAL
             continue
 
-        ret, frame = cap.read()
+        try:
+            ret, frame = cap.read()
+        except Exception as e:
+            print(f"[ERROR] 摄像头 {camera_id} 读取异常: {e}")
+            # ret = False
 
         if not ret:
             read_fail_count += 1
@@ -1001,11 +1032,12 @@ def process_stream(camera_id, rtsp_url, config, fence_lock, algorithm_lock, fenc
 
 if __name__ == "__main__":
     config = load_config()
-    cams = get_cameras()
+    while True:
+        cams = get_cameras()
     # cams = cams[:1]   # 只取一路
     # 取最后一路
     # cams = [cams[-1]]
-    print(cams)
+        print(cams)
     # cams = get_camera_by_id(1997855393744818240)
     # cams = [('1997855393744818240', 'rtsp://admin:zh5555002@10.164.60.4:554/Streaming/Channels/6701', '172.16.18.77')]
     # cams = [('1997855044199911425', 'rtsp://admin:ad123456@10.161.60.101:554/Streaming/Channels/1601', '10.209.151.115')]
