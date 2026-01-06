@@ -22,7 +22,6 @@ import os
 from collections import defaultdict
 import psutil
 import re
-from detectors.com import build_input_dataset, parse_output
 from ais_bench.infer.interface import InferSession
 from collections import defaultdict
 import threading
@@ -65,6 +64,9 @@ overcrowd_active = defaultdict(bool)
 """
 常量区
 """
+# 运行中的流
+RUNNING_STREAMS = {}
+
 # 电子围栏区域（动态更新）
 fence_dict = {}
 algorithm_dict = {}
@@ -254,18 +256,18 @@ def upload_warning_video(video_bytes, camera_id):
     return url
 
 # 语音播报
-def alert_intrusion(camera_id):
-    current_time = time.time()
-    last_time = last_alert_time.get(camera_id, 0)
-
-    # 如果距离上次播报超过 60 秒，则播放语音
-    if current_time - last_time >= 60:
-        pygame.mixer.init()
-        pygame.mixer.music.load("E:\project\yw\ef\cfg\warning.mp3")
-        pygame.mixer.music.play()
-        last_alert_time[camera_id] = current_time
-    else:
-        print(f"摄像头 {camera_id} 在冷却期内，跳过播报")
+# def alert_intrusion(camera_id):
+#     current_time = time.time()
+#     last_time = last_alert_time.get(camera_id, 0)
+#
+#     # 如果距离上次播报超过 60 秒，则播放语音
+#     if current_time - last_time >= 60:
+#         pygame.mixer.init()
+#         pygame.mixer.music.load("E:\project\yw\ef\cfg\warning.mp3")
+#         pygame.mixer.music.play()
+#         last_alert_time[camera_id] = current_time
+#     else:
+#         print(f"摄像头 {camera_id} 在冷却期内，跳过播报")
 
 # 生成报警视频
 def generate_warning_video_memory(frame_buffer, video_frames, FPS, camera_id):
@@ -905,14 +907,14 @@ def detect_overcrowding(frame, camera_id, rtsp_url, config, frame_buffer, FPS, i
 
     return True
 
-def start_all_streams(config, fence_lock, algorithm_lock, fence_dict, algorithm_dict, latest_pre_frames, cams):
-    for cam_id, rtsp_url, ip_address, algorithmtypes in cams:
-        thread = threading.Thread(
-            target=process_stream,
-            args=(cam_id, rtsp_url, config, fence_lock, algorithm_lock, fence_dict, algorithm_dict, latest_pre_frames, ip_address, algorithmtypes),
-            daemon=True
-        )
-        thread.start()
+# def start_all_streams(config, fence_lock, algorithm_lock, fence_dict, algorithm_dict, latest_pre_frames, cams):
+#     for cam_id, rtsp_url, ip_address, algorithmtypes in cams:
+#         thread = threading.Thread(
+#             target=process_stream,
+#             args=(cam_id, rtsp_url, config, fence_lock, algorithm_lock, fence_dict, algorithm_dict, latest_pre_frames, ip_address, algorithmtypes),
+#             daemon=True
+#         )
+#         thread.start()
 
 def safe_open_capture(rtsp_url, retry=3):
     """更安全的打开 RTSP，带异常捕获"""
@@ -928,17 +930,10 @@ def safe_open_capture(rtsp_url, retry=3):
     return None
     # print(f"[INFO] 启动摄像头 {cam_id} 的流")
 
-def process_stream(camera_id, rtsp_url, config, fence_lock, algorithm_lock, fence_dict, algorithm_dict, latest_pre_frames, ip_address, algorithmtypes):
+def process_stream(camera_id, rtsp_url, config, fence_lock, algorithm_lock, fence_dict, algorithm_dict, latest_pre_frames, ip_address, algorithmtypes, stop_event):
 
-    # def open_capture():
-    #     cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
-    #     if not cap.isOpened():
-    #         return None
-    #     return cap
-    #
-    # cap = open_capture()
     cap = safe_open_capture(rtsp_url)
-    reconnect_count = 0
+
     backoff = RECONNECT_INTERVAL  # 初始重连间隔
 
     if cap is None:
@@ -949,7 +944,7 @@ def process_stream(camera_id, rtsp_url, config, fence_lock, algorithm_lock, fenc
     read_fail_count = 0
     reconnect_count = 0
 
-    while True:
+    while not stop_event.is_set():
         # ====== cap 不存在，尝试重连 ======
         if cap is None or not cap.isOpened():
             reconnect_count += 1
@@ -1030,21 +1025,158 @@ def process_stream(camera_id, rtsp_url, config, fence_lock, algorithm_lock, fenc
     print(f"[INFO] 摄像头 {camera_id} 流结束", flush=True)
 
 
+
+def start_single_stream(
+    cam,
+    config,
+    fence_lock,
+    algorithm_lock,
+    fence_dict,
+    algorithm_dict,
+    latest_pre_frames
+):
+    camera_id, rtsp_url, ip_address, algorithmtypes = cam
+
+    stop_event = threading.Event()
+
+    t = threading.Thread(
+        target=process_stream,
+        args=(
+            camera_id,
+            rtsp_url,
+            config,
+            fence_lock,
+            algorithm_lock,
+            fence_dict,
+            algorithm_dict,
+            latest_pre_frames,
+            ip_address,
+            algorithmtypes,
+            stop_event
+        ),
+        daemon=True
+    )
+    t.start()
+
+    RUNNING_STREAMS[camera_id] = {
+        "thread": t,
+        "stop_event": stop_event,
+        "cam": cam
+    }
+
+    print(f"[INFO] 摄像头启动: {camera_id}")
+
+def stop_single_stream(camera_id):
+    info = RUNNING_STREAMS.get(camera_id)
+    if not info:
+        return
+
+    print(f"[INFO] 停止摄像头: {camera_id}")
+
+    info["stop_event"].set()
+    info["thread"].join(timeout=5)
+
+    RUNNING_STREAMS.pop(camera_id, None)
+
+
+def cam_changed(old_cam, new_cam):
+    # (id, rtsp, ip, algorithmtypes)
+    return old_cam[1:] != new_cam[1:]
+
+
+def stop_removed_streams(cams):
+    new_ids = {cam["id"] for cam in cams}
+
+    for cam_id in list(RUNNING_STREAMS.keys()):
+        if cam_id not in new_ids:
+            proc = RUNNING_STREAMS.pop(cam_id)
+            safe_stop(proc)
+
+def camera_poll_loop(
+    config,
+    fence_lock,
+    algorithm_lock,
+    fence_dict,
+    algorithm_dict,
+    latest_pre_frames,
+    interval=600
+):
+    while True:
+        try:
+            cams = get_cameras() or []
+
+            new_map = {cam[0]: cam for cam in cams}
+
+            # === 启动新增 ===
+            for cam_id, cam in new_map.items():
+                if cam_id not in RUNNING_STREAMS:
+                    start_single_stream(
+                        cam,
+                        config,
+                        fence_lock,
+                        algorithm_lock,
+                        fence_dict,
+                        algorithm_dict,
+                        latest_pre_frames
+                    )
+
+            # === 删除已不存在的 ===
+            for cam_id in list(RUNNING_STREAMS.keys()):
+                if cam_id not in new_map:
+                    stop_single_stream(cam_id)
+
+            # === 重启配置变化的 ===
+            for cam_id, info in list(RUNNING_STREAMS.items()):
+                new_cam = new_map.get(cam_id)
+                if new_cam and cam_changed(info["cam"], new_cam):
+                    print(f"[INFO] 摄像头配置变化，重启: {cam_id}")
+                    stop_single_stream(cam_id)
+                    start_single_stream(
+                        new_cam,
+                        config,
+                        fence_lock,
+                        algorithm_lock,
+                        fence_dict,
+                        algorithm_dict,
+                        latest_pre_frames
+                    )
+
+        except Exception as e:
+            print(f"[ERROR] camera poll loop 异常: {e}", flush=True)
+
+        time.sleep(interval)
+
+
 if __name__ == "__main__":
     config = load_config()
-    while True:
-        cams = get_cameras()
+    #
+    # cams = start_all_cameras()
+    # cams = get_cameras()
+    # print(cams)
     # cams = cams[:1]   # 只取一路
     # 取最后一路
     # cams = [cams[-1]]
-        print(cams)
     # cams = get_camera_by_id(1997855393744818240)
     # cams = [('1997855393744818240', 'rtsp://admin:zh5555002@10.164.60.4:554/Streaming/Channels/6701', '172.16.18.77')]
     # cams = [('1997855044199911425', 'rtsp://admin:ad123456@10.161.60.101:554/Streaming/Channels/1601', '10.209.151.115')]
     #1997855393744818240 172.16.18.77
-    start_all_streams(config, fence_lock, algorithm_lock, fence_dict, algorithm_dict, latest_pre_frames, cams)
+    # start_all_streams(config, fence_lock, algorithm_lock, fence_dict, algorithm_dict, latest_pre_frames, cams)
 
-    # 阻塞主线程，避免退出
+    threading.Thread(
+        target=camera_poll_loop,
+        args=(
+            config,
+            fence_lock,
+            algorithm_lock,
+            fence_dict,
+            algorithm_dict,
+            latest_pre_frames
+        ),
+        daemon=True
+    ).start()
+
     while True:
-        time.sleep(100)
+        time.sleep(60)
+
+
 
