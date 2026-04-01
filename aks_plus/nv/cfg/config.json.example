@@ -1,0 +1,78 @@
+{
+  "_comment": "Video Analytics System Configuration - 视频分析系统配置",
+
+  "model": {
+    "_comment_person": "人员检测模型 - 使用官方YOLOv8n",
+    "person_model_path": "models/yolov8n.pt",
+
+    "_comment_helmet": "安全帽检测模型 - 自定义训练，类别为 helmet, head",
+    "helmet_model_path": "models/safehat.pt",
+
+    "_comment_backend": "推理后端: ultralytics (推荐), tensorrt, onnx, torch",
+    "backend": "ultralytics",
+
+    "input_size": [640, 640],
+    "confidence": 0.4,
+    "iou": 0.45,
+    "device_id": 0,
+    "fp16": false
+  },
+
+  "detection": {
+    "_comment_intrusion": "人员闯入检测配置",
+    "intrusion_min_frames": 25,
+    "intrusion_confidence": 0.5,
+    "intrusion_cooldown": 60,
+
+    "_comment_helmet": "安全帽检测配置",
+    "helmet_min_frames": 25,
+    "helmet_confidence": 0.4,
+    "helmet_cooldown": 60,
+    "helmet_crop_padding": 0.2,
+
+    "_comment_overcrowd": "人员超员检测配置",
+    "overcrowd_max_people": 15,
+    "overcrowd_duration": 2.0,
+    "overcrowd_cooldown": 60,
+    "overcrowd_confidence": 0.4
+  },
+
+  "storage": {
+    "_comment": "存储服务: minio 或 local",
+    "type": "local",
+
+    "_comment_minio": "MinIO配置 (如果使用minio)",
+    "endpoint": "172.21.3.141:8084",
+    "access_key": "root",
+    "secret_key": "12345678",
+    "secure": false,
+    "bucket_name": "yolo",
+    "public_url": "http://172.21.3.141:8084",
+
+    "_comment_local": "本地存储路径 (如果使用local)",
+    "local_path": "./output"
+  },
+
+  "alarm": {
+    "_comment": "报警服务: http, async, console",
+    "type": "console",
+    "timeout": 10,
+    "retry_count": 3,
+
+    "_comment_endpoints": "报警接收端点",
+    "endpoints": ["http://172.21.3.141:8080/alarm"],
+    "endpoints_intrusion": ["http://172.21.3.141:8080/alarm/intrusion"],
+    "endpoints_helmet": ["http://172.21.3.141:8080/alarm/helmet"],
+    "endpoints_overcrowd": ["http://172.21.3.141:8080/alarm/overcrowd"]
+  },
+
+  "stream": {
+    "fps": 25,
+    "skip_frames": 0,
+    "max_reconnect": 5,
+    "reconnect_interval": 2.0,
+    "pre_buffer_seconds": 3,
+    "post_record_seconds": 3,
+    "enable_display": false
+  }
+}

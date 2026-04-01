@@ -1,0 +1,25 @@
+# NVIDIA GPU Video Analytics System Requirements
+
+# Core Dependencies
+numpy>=1.23.0
+opencv-python>=4.8.0
+requests>=2.31.0
+minio>=7.1.0
+
+# Inference Backends (Choose one or more)
+
+## Option 1: TensorRT (Recommended for Production)
+# Install TensorRT from NVIDIA: https://developer.nvidia.com/tensorrt
+# Then: pip install tensorrt pycuda
+# tensorrt>=8.6.0
+# pycuda>=2022.2
+
+## Option 2: ONNX Runtime (Alternative)
+onnxruntime-gpu>=1.16.0
+
+## Option 3: PyTorch (For Debugging)
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Optional: Ultralytics for YOLO models
+ultralytics>=8.0.0

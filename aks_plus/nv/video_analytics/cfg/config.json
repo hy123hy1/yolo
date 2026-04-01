@@ -1,0 +1,12 @@
+{
+  "model_path": "./models/yolov8n.pt",
+  "confidence_threshold": 0.5,
+  "default_fence": [[790, 350], [1100, 350], [1100, 820], [790, 820]],
+  "rtsp_streams": {
+    "1993263066585894917": "rtsp://admin:zh5555002@10.164.60.4:554/Streaming/Channels/1701"
+  },
+  "server_endpoints": ["http://172.21.3.141:8080/aks-mkaqjcyj/cameraMonitoring/intrusionDetection"],
+  "server_endpoints2": ["http://172.21.3.141:8080/aks-mkaqjcyj/cameraMonitoring/safetyHelmetDetection"],
+  "server_endpoints3": ["http://172.21.3.141:8080/aks-mkaqjcyj/cameraMonitoring/crowdGathering"],
+  "server_endpoints4": ["http://172.21.3.141:8080/aks-mkaqjcyj/cameraMonitoring/saveVido"]
+}

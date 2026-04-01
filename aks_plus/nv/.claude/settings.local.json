@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//e/project/MaxKB-2/apps/maxkb/settings/**)",
+      "Read(//e/project/MaxKB-2/**)"
+    ]
+  }
+}

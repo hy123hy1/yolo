@@ -1,0 +1,83 @@
+{
+  "skill_name": "daily-report",
+  "evals": [
+    {
+      "id": 1,
+      "name": "多项目并行场景",
+      "prompt": "帮我整理今天的对话记录生成日报",
+      "context": [
+        "用户：帮我看一下这个API接口设计",
+        "Claude：好的，这是RESTful设计建议...",
+        "用户：完成了API文档，现在处理前端页面",
+        "Claude：需要我帮你写React组件吗？",
+        "用户：前端组件写好了，但是样式有点问题",
+        "用户：决定用Tailwind而不是styled-components，更方便",
+        "用户：数据库迁移脚本还没写，明天再弄"
+      ],
+      "expected_output": "生成的日报应包含：1) API设计项目（已完成文档）；2) 前端开发项目（已完成组件，决策：选用Tailwind）；3) 数据库迁移（待办）",
+      "assertions": [
+        {
+          "name": "包含项目分组",
+          "check": "output contains 'API' or '前端' or '项目'"
+        },
+        {
+          "name": "包含关键决策",
+          "check": "output contains 'Tailwind' or '决策'"
+        },
+        {
+          "name": "包含明日计划",
+          "check": "output contains '明天' or '明日' or '下一步'"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "问题追踪场景",
+      "prompt": "总结一下今天的工作进度",
+      "context": [
+        "用户：视频流处理还是有问题",
+        "Claude：是什么错误？",
+        "用户：内存泄漏，已经定位到是buffer没释放",
+        "用户：修复了，现在测试通过",
+        "用户：但是帧率还是不够，可能要用多线程优化",
+        "用户：先记录一下，明天找架构师讨论"
+      ],
+      "expected_output": "日报应包含：1) 内存泄漏修复（已完成）；2) 性能优化问题（进行中，待讨论）",
+      "assertions": [
+        {
+          "name": "包含问题描述",
+          "check": "output contains '内存' or '泄漏' or '问题'"
+        },
+        {
+          "name": "包含解决方案",
+          "check": "output contains '修复' or '解决'"
+        },
+        {
+          "name": "包含待决事项",
+          "check": "output contains '多线程' or '明天' or '架构师'"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "简单对话场景",
+      "prompt": "帮我写个日报",
+      "context": [
+        "用户：帮我写个Python脚本处理CSV文件",
+        "Claude：好的，这是代码...",
+        "用户：完成了，谢谢！"
+      ],
+      "expected_output": "简洁的日报，包含CSV处理任务的完成情况",
+      "assertions": [
+        {
+          "name": "包含任务描述",
+          "check": "output contains 'CSV' or '脚本' or 'Python'"
+        },
+        {
+          "name": "状态为已完成",
+          "check": "output contains '完成' or '✅'"
+        }
+      ]
+    }
+  ]
+}
