@@ -165,12 +165,13 @@ class StreamProcessor:
         print(f"[StreamProcessor] Started: {self.config.camera_id}")
         return True
 
-    def stop(self, timeout: float = 5.0):
+    def stop(self, timeout: float = 5.0, force: bool = False):
         """
         停止流处理
 
         Args:
             timeout: 等待超时(秒)
+            force: 是否强制立即停止（不等待当前帧处理完成）
         """
         if not self.is_running:
             return
@@ -180,7 +181,11 @@ class StreamProcessor:
         self._state = StreamState.STOPPED
 
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=timeout)
+            if force:
+                # 强制立即停止，减少超时时间
+                self._thread.join(timeout=min(timeout, 1.0))
+            else:
+                self._thread.join(timeout=timeout)
 
         print(f"[StreamProcessor] Stopped: {self.config.camera_id}")
 
@@ -304,13 +309,13 @@ class StreamProcessor:
                 result = detector.process(context)
                 self.stats.detection_count += 1
 
-                # 调试输出 (每100帧打印一次)
-                if self.stats.frame_count % 100 == 0:
-                    debug_info = result.debug_info if hasattr(result, 'debug_info') else {}
-                    print(f"[Debug][Camera {self.config.camera_id}][Algo {algo_type}] "
-                          f"triggered={result.triggered}, "
-                          f"detections={len(result.detections)}, "
-                          f"debug={debug_info}")
+                # 调试输出 (如需开启，取消下面注释)
+                # if self.stats.frame_count % 100 == 0:
+                #     debug_info = result.debug_info if hasattr(result, 'debug_info') else {}
+                #     print(f"[Debug][Camera {self.config.camera_id}][Algo {algo_type}] "
+                #           f"triggered={result.triggered}, "
+                #           f"detections={len(result.detections)}, "
+                #           f"debug={debug_info}")
 
                 # 处理事件
                 if result.triggered and result.event:
@@ -501,11 +506,11 @@ class StreamManager:
             for cid, proc in self._processors.items()
         }
 
-    def stop_all(self, timeout: float = 10.0):
+    def stop_all(self, timeout: float = 10.0, force: bool = False):
         """停止所有流"""
         with self._lock:
             for camera_id, processor in list(self._processors.items()):
-                processor.stop(timeout)
+                processor.stop(timeout, force=force)
             self._processors.clear()
 
     def _on_event(self, camera_id: str, event: DetectionEvent, result: DetectionResultBundle):

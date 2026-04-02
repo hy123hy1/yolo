@@ -11,53 +11,22 @@ This is a **Video Analytics System** migrated from Ascend NPU to NVIDIA GPU. It 
 
 The system uses a modular architecture with pluggable inference backends (Ultralytics YOLO, TensorRT, ONNX Runtime, PyTorch).
 
-## Common Commands
+## Build And Test
 
-### Running the System
+- Install: `pip install -r requirements.txt`
+- Dev (API mode): `python main_api.py`
+- Dev (legacy poll mode): `python main.py`
+- Test inference: `python test_ultralytics.py`
+- Test detection: `python test_detection.py`
 
-```bash
-# Run the main application (production)
-python main.py
+## Architecture Boundaries
 
-# Run with specific config
-python main.py  # Uses cfg/config.json
-
-# Test individual components
-python test_ultralytics.py      # Test inference engine
-python test_detection.py        # Test detection algorithms
-```
-
-### Development & Testing
-
-```bash
-# Test engine with different backends
-python -c "
-from video_analytics.engines.factory import create_infer_engine
-engine = create_infer_engine('models/yolov8n.pt', backend='ultralytics')
-print(engine.get_stats())
-"
-
-# Run detector test with real image
-python test_detection.py
-# Then select: 1 (intrusion), 2 (helmet), or 3 (overcrowd)
-```
-
-### Model Management
-
-```bash
-# Models are stored in models/
-# Required models:
-# - models/yolov8n.pt        # Person detection (official YOLOv8)
-# - models/safehat.pt        # Helmet detection (custom trained, classes: helmet, head)
-
-# Convert models (if needed)
-python -c "
-from video_analytics.engines.factory import convert_model
-convert_model('yolov8n.onnx', 'models/yolov8n.engine')
-"
-```
-
-## High-Level Architecture
+- Inference engines live in `video_analytics/engines/`
+- Detectors live in `video_analytics/detectors/`
+- Stream processing lives in `video_analytics/core/`
+- Services (storage/alarm/video) live in `video_analytics/services/`
+- Do not put business logic in API handlers (keep handlers thin)
+- Shared types live in `video_analytics/detectors/base_detector.py`
 
 ### Core Flow
 
@@ -83,7 +52,6 @@ RTSP Stream → StreamProcessor → Detector → EventStateMachine → Services
 **3. State Machine** (`video_analytics/core/state_machine.py`)
 - `EventStateMachine`: Manages event lifecycle (IDLE → COUNTING → TRIGGERED → ONGOING → COOLDOWN)
 - Configurable: `min_trigger_frames`, `min_end_frames`, `cooldown_seconds`
-- Replaces the old `defaultdict` global variables approach
 
 **4. Stream Processing** (`video_analytics/core/stream_processor.py`)
 - `StreamProcessor`: One per camera, manages RTSP connection, frame buffer, detector pipeline
@@ -95,118 +63,95 @@ RTSP Stream → StreamProcessor → Detector → EventStateMachine → Services
 - `AlarmService`: HTTP POST or console output for alerts
 - `VideoService`: Async video generation with pre/post frames
 
-### Data Flow
+## Coding Conventions
 
-```python
-# 1. StreamProcessor reads frame from RTSP
-frame = cap.read()
-
-# 2. Creates context with frame buffer
-context = DetectionContext(
-    camera_id=camera_id,
-    frame=frame,
-    frame_buffer=deque([...]),  # Pre-event frames
-    ...
-)
-
-# 3. Detector processes frame
-result = detector.process(context)  # Returns DetectionResultBundle
-# - Runs inference: engine.infer(frame)
-# - Filters by class (e.g., only person class 0)
-# - Checks fence regions (for intrusion)
-# - Updates EventStateMachine
-# - Returns triggered=True/False
-
-# 4. If triggered, handle event
-if result.triggered:
-    storage.upload_image(result.visualized_frame)
-    alarm.send_alarm(result.event)
-    video.async_generate_and_upload(context.frame_buffer)
-```
+- Prefer dependency injection (engines/services passed to constructors)
+- Do not introduce new global state without explicit justification
+- Reuse existing detector base class from `video_analytics/detectors/base_detector.py`
+- Follow existing patterns: `DetectionContext` in, `DetectionResultBundle` out
+- Use type hints for public methods
 
 ### Algorithm Types
 
 | Type | Detector | Model | Classes | Notes |
 |------|----------|-------|---------|-------|
 | "1" | IntrusionDetector | yolov8n.pt | person(0) | Requires fence region setup |
-| "2" | HelmetDetector | yolov8n.pt + safehat.pt | person(0), helmet(0), head(1) | Two-stage: detect person → crop → classify helmet |
-| "3" | OvercrowdDetector | yolov8n.pt | person(0) | Counts persons, triggers if > max_people |
+| "2" | HelmetDetector | yolov8n.pt + safehat.pt | person(0), helmet(0), head(1) | Two-stage detection |
+| "3" | OvercrowdDetector | yolov8n.pt | person(0) | Counts persons |
 
-## Important Implementation Details
+### Configuration
 
-### Fence Configuration (Intrusion Detection)
-
-If no fence is set for a camera, intrusion detector defaults to full-frame detection:
-
-```python
-# In main.py or initialization:
-intrusion_detector = detectors["1"]
-intrusion_detector.set_fence_from_points(
-    camera_id="1997855044199911425",
-    points=[(100, 100), (500, 100), (500, 400), (100, 400)]  # Clockwise from top-left
-)
-```
-
-### Helmet Detection Two-Stage Process
-
-1. Primary engine detects persons
-2. For each person, crop region with padding
-3. Secondary engine (safehat.pt) classifies helmet/head
-4. "head" class without "helmet" = violation
-
-### Configuration File (cfg/config.json)
-
+Configuration lives in `cfg/config.json`:
 ```json
 {
   "model": {
     "person_model_path": "models/yolov8n.pt",
     "helmet_model_path": "models/safehat.pt",
-    "backend": "ultralytics",  // ultralytics | tensorrt | onnx | torch
-    "confidence": 0.4
+    "backend": "ultralytics"
   },
   "detection": {
-    "intrusion_min_frames": 25,      // Debounce frames
-    "intrusion_cooldown": 60,        // Seconds between alerts
-    "helmet_min_frames": 25,
-    "overcrowd_max_people": 15
-  },
-  "storage": {
-    "type": "local",  // local | minio
-    "local_path": "./output"
-  },
-  "alarm": {
-    "type": "console"  // console | http | async
+    "intrusion_min_frames": 25,
+    "intrusion_cooldown": 60
   }
 }
 ```
 
-### Camera Data Format
+## Safety Rails
 
-Cameras are loaded from API or hardcoded in `main.py`:
-```python
-cameras = [(
-    camera_id: str,      # e.g., "1997855044199911425"
-    rtsp_url: str,       # e.g., "rtsp://admin:pass@ip:554/..."
-    ip_address: str,     # Camera IP
-    algorithm_types: str # "1" or "1,2" or "1,2,3"
-)]
-```
+### NEVER
+
+- Modify `cfg/config.json` or model paths without checking existing camera configs
+- Remove feature flags (like `use_reloader`) without searching all call sites
+- Commit without testing the API endpoint (`/set_fence`)
+- Use blocking operations in detector `process()` method (it runs per-frame)
+- Modify fence configuration without proper thread locking
+
+### ALWAYS
+
+- Show diff before committing
+- Update fence coordinates when camera resolution changes
+- Handle `KeyboardInterrupt` with proper cleanup in main entry points
+- Test with `algorithmType` 1, 2, and 3 if modifying base detector logic
+- Verify FFmpeg processes are cleaned up on shutdown
+
+## Verification
+
+- Backend changes: `python test_detection.py` + `python test_ultralytics.py`
+- API changes: test with curl:
+  ```bash
+  curl -X POST "http://localhost:5005/set_fence" \
+    -H "Content-Type: application/json" \
+    -d '{"cam_id": "test", "url": "rtsp://...", "algorithmType": 1, "fence_area": {...}}'
+  ```
+- Shutdown test: Ctrl+C should kill all processes immediately without hanging
+- Stream restart test: `/set_fence` with existing `cam_id` should restart cleanly
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `main.py` | Entry point: initializes engines/detectors/services, camera poll loop |
+| `main_api.py` | API entry point: Flask server with event-driven stream management |
+| `main.py` | Legacy entry point: polling-based camera discovery |
 | `video_analytics/engines/ultralytics_engine.py` | Primary inference backend |
-| `video_analytics/detectors/intrusion_detector.py` | Algorithm 1 implementation |
-| `video_analytics/detectors/helmet_detector.py` | Algorithm 2 (two-stage) |
-| `video_analytics/core/state_machine.py` | Event lifecycle management |
+| `video_analytics/detectors/intrusion_detector.py` | Algorithm 1 with fence support |
 | `video_analytics/core/stream_processor.py` | RTSP stream handling |
+| `video_analytics/core/state_machine.py` | Event lifecycle management |
 | `cfg/config.json` | Runtime configuration |
 
-## Debugging Tips
+## Compact Instructions
 
-- Enable debug output: Check `StreamProcessor._process_frame()` for `[Debug]` logs every 100 frames
-- Test without RTSP: Use `test_detection.py` with a static image
-- Check fence setup: If no detections for intrusion, verify fence is set or default full-frame is active
-- Model classes: Helmet model uses `{0: 'helmet', 1: 'head'}`, not standard COCO classes
+Preserve:
+
+1. Architecture decisions (event-driven API vs polling, pluggable inference backends)
+2. Modified files and key changes:
+   - `main_api.py`: Flask API + fence_worker process management
+   - `video_analytics/core/stream_processor.py`: StreamProcessor stop logic
+   - `video_analytics/detectors/intrusion_detector.py`: Fence configuration
+3. Current verification status:
+   - API mode: `python main_api.py` → test with curl
+   - Shutdown: Ctrl+C should exit immediately
+   - Stream restart: `/set_fence` with existing cam_id works
+4. Open risks, TODOs, rollback notes:
+   - Fence coordinate scaling depends on frontend `default_area`
+   - FFmpeg subprocess cleanup relies on `psutil` + `os._exit()`
+   - Detection and fence drawing run on same RTSP source (decoupled)

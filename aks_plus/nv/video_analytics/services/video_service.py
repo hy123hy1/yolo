@@ -24,7 +24,7 @@ class VideoConfig:
     fps: int = 25
     pre_seconds: int = 3       # 事件前录制秒数
     post_seconds: int = 3      # 事件后录制秒数
-    codec: str = "mp4v"        # 视频编码器
+    codec: str = "avc1"        # 视频编码器
     quality: int = 20          # 视频质量 (0-100, 越小越好)
     max_retries: int = 3
 
