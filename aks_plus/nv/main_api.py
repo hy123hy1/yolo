@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cv2
 import numpy as np
 import psutil
+import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
@@ -32,6 +33,7 @@ from video_analytics.engines.ultralytics_engine import YOLOV8_CLASSES, SAFETY_HE
 from video_analytics.detectors.intrusion_detector import IntrusionDetector, FenceRegion
 from video_analytics.detectors.helmet_detector import HelmetDetector
 from video_analytics.detectors.overcrowd_detector import OvercrowdDetector
+from video_analytics.detectors.new_detector import NewDetector
 from video_analytics.core.stream_processor import StreamManager, StreamConfig
 from video_analytics.services.storage_service import StorageServiceFactory
 from video_analytics.services.alarm_service import AlarmServiceFactory
@@ -473,6 +475,18 @@ def initialize_system() -> Tuple[StreamManager, Dict]:
     )
     detectors["3"] = overcrowd_detector
 
+    # Algorithm 4 - 新算法
+    new_detector = NewDetector(
+        engine=person_engine,  # 或创建专用引擎
+        config={
+            "min_frames": config.detection.new_min_frames,
+            "confidence": config.detection.new_confidence,
+            "cooldown_seconds": config.detection.new_cooldown,
+        }
+    )
+    detectors["4"] = new_detector
+
+
     # 3. 创建服务
     print("[System] Creating services...")
 
@@ -564,8 +578,8 @@ def set_fence():
             "message": "缺少必要参数: algorithmType, url, cam_id"
         }), 400
 
-    # 算法类型映射: 前端 1,2,3 -> 内部 "1","2","3"
-    algo_map = {1: "1", 2: "2", 3: "3"}
+    # 算法类型映射: 前端 1,2,3 -> 内部 "1","2","3"   4即为新增算法
+    algo_map = {1: "1", 2: "2", 3: "3", 4: "4"}
     algo_type_str = algo_map.get(algorithm_type)
     if not algo_type_str:
         return jsonify({
@@ -576,100 +590,13 @@ def set_fence():
     print(f"[API] 请求启动 camera_id={camera_id}, algo={algo_type_str}, url={rtsp_url}")
 
     try:
-        # 获取视频分辨率
-        cap = cv2.VideoCapture(rtsp_url)
-        if not cap.isOpened():
-            return jsonify({
-                "status": "error",
-                "message": "无法打开RTSP流"
-            }), 500
-
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        cap.release()
-
-        if not width or not height:
-            return jsonify({
-                "status": "error",
-                "message": "无法获取视频分辨率"
-            }), 500
-
-        print(f"[API] 视频分辨率: {width}x{height}")
-
-        # 计算围栏多边形坐标
-        if rect:
-            fence_area = rect_to_polygon(rect, default_area, width, height)
-        else:
-            # 默认全图
-            fence_area = [[0, 0], [width, 0], [width, height], [0, height]]
-
-        print(f"[API] 围栏坐标: {fence_area}")
-
-        with system_state.lock:
-            # 1. 如果已存在，先停止旧流
-            if camera_id in system_state.active_fence_streams:
-                print(f"[API] 摄像头 {camera_id} 已存在，停止旧流")
-                stop_fence_worker(camera_id)
-                system_state.stream_manager.remove_stream(camera_id)
-                time.sleep(0.5)
-
-            # 2. 设置电子围栏（关键！）
-            if algo_type_str == "1" and "1" in system_state.detectors:
-                # 闯入检测需要设置围栏
-                intrusion_detector = system_state.detectors["1"]
-                intrusion_detector.set_fence_from_points(camera_id, fence_area)
-                print(f"[API] 已设置闯入检测围栏 camera_id={camera_id}")
-
-            # 3. 启动检测流（事件驱动！无需等待轮询）
-            config = system_state.config
-            stream_config = StreamConfig(
-                camera_id=camera_id,
-                rtsp_url=rtsp_url,
-                ip_address="",  # 可从URL解析或前端传入
-                algorithm_types={algo_type_str},
-                fps=config.stream.fps,
-                skip_frames=config.stream.skip_frames,
-                max_reconnect=config.stream.max_reconnect,
-                pre_buffer_seconds=config.stream.pre_buffer_seconds,
-                enable_display=False
-            )
-
-            success = system_state.stream_manager.add_stream(stream_config)
-            if not success:
-                return jsonify({
-                    "status": "error",
-                    "message": "启动检测流失败"
-                }), 500
-
-            print(f"[API] 检测流已启动 camera_id={camera_id}")
-
-            # 4. 启动画框进程
-            p = Process(
-                target=fence_worker,
-                args=(camera_id, rtsp_url, fence_area),
-                daemon=True
-            )
-            p.start()
-
-            system_state.active_fence_streams[camera_id] = {
-                "process": p,
-                "url": rtsp_url,
-                "algorithm_type": algo_type_str,
-                "fence_area": fence_area
-            }
-            system_state.fence_dict[camera_id] = fence_area
-
-        output_url = f"rtsp://192.168.1.61:554/Streaming/Channels/{camera_id}"
-        print(f"[API] 画框流输出地址: {output_url}")
-
-        return jsonify({
-            "status": "success",
-            "camera_id": camera_id,
-            "algorithm_type": algo_type_str,
-            "output_url": output_url,
-            "detection_started": True
-        })
-
+        return _start_camera_detection(
+            camera_id=camera_id,
+            rtsp_url=rtsp_url,
+            algorithm_type=algorithm_type,
+            fence_area=rect,
+            default_area=default_area
+        )
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -740,6 +667,233 @@ def get_status():
 
 
 # =========================
+# 实时摄像头管理 Webhook API
+# =========================
+
+@app.route("/camera/webhook", methods=["POST"])
+def camera_webhook():
+    """
+    摄像头变更Webhook - 实时推送增删改
+
+    Request Body:
+    {
+        "action": "add" | "remove" | "update",
+        "camera": {
+            "cam_id": "2027671157372751872",
+            "url": "rtsp://...",
+            "algorithmType": 1,  // 1=闯入, 2=安全帽, 3=超员, 4=新算法
+            "fence_area": {"x": 350, "y": 350, "width": 600, "height": 300},
+            "default_area": {"width": 960, "height": 540}
+        }
+    }
+    """
+    data = request.get_json() or {}
+    action = data.get("action")
+    camera_data = data.get("camera", {})
+
+    if action not in ("add", "remove", "update"):
+        return jsonify({"status": "error", "message": "action必须是 add/remove/update"}), 400
+
+    camera_id = str(camera_data.get("cam_id", ""))
+    if not camera_id:
+        return jsonify({"status": "error", "message": "缺少 cam_id"}), 400
+
+    try:
+        if action == "remove":
+            # 直接复用 delete_stream 逻辑
+            return _remove_camera(camera_id)
+
+        # add 或 update 都需要这些字段
+        rtsp_url = camera_data.get("url")
+        algorithm_type = camera_data.get("algorithmType")
+
+        if not all([rtsp_url, algorithm_type]):
+            return jsonify({"status": "error", "message": "add/update 需要 url 和 algorithmType"}), 400
+
+        if action == "update":
+            # 先删除旧流，再添加新配置
+            _remove_camera(camera_id, silent=True)
+
+        # 调用 set_fence 内部逻辑启动检测
+        return _start_camera_detection(
+            camera_id=camera_id,
+            rtsp_url=rtsp_url,
+            algorithm_type=algorithm_type,
+            fence_area=camera_data.get("fence_area"),
+            default_area=camera_data.get("default_area", {"width": 960, "height": 540})
+        )
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+def _remove_camera(camera_id: str, silent: bool = False):
+    """内部函数：删除摄像头"""
+    with system_state.lock:
+        stop_fence_worker(camera_id)
+        if system_state.stream_manager:
+            system_state.stream_manager.remove_stream(camera_id)
+        if "1" in system_state.detectors:
+            system_state.detectors["1"].clear_fence(camera_id)
+
+    if not silent:
+        print(f"[Webhook] 已删除摄像头 {camera_id}")
+    return jsonify({"status": "success", "action": "remove", "camera_id": camera_id})
+
+
+def _start_camera_detection(camera_id: str, rtsp_url: str, algorithm_type: int,
+                            fence_area: dict = None, default_area: dict = None):
+    """内部函数：启动摄像头检测（复用 set_fence 核心逻辑）"""
+    algo_map = {1: "1", 2: "2", 3: "3", 4: "4"}
+    algo_type_str = algo_map.get(algorithm_type)
+    if not algo_type_str:
+        return jsonify({"status": "error", "message": f"无效的 algorithmType: {algorithm_type}"}), 400
+
+    # 获取视频分辨率
+    cap = cv2.VideoCapture(rtsp_url)
+    if not cap.isOpened():
+        return jsonify({"status": "error", "message": "无法打开RTSP流"}), 500
+
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+
+    if not width or not height:
+        return jsonify({"status": "error", "message": "无法获取视频分辨率"}), 500
+
+    # 计算围栏坐标
+    if fence_area:
+        fence_polygon = rect_to_polygon(fence_area, default_area, width, height)
+    else:
+        fence_polygon = [[0, 0], [width, 0], [width, height], [0, height]]
+
+    with system_state.lock:
+        # 如果已存在，先停止
+        if camera_id in system_state.active_fence_streams:
+            stop_fence_worker(camera_id)
+            system_state.stream_manager.remove_stream(camera_id)
+            time.sleep(0.5)
+
+        # 设置围栏（仅闯入检测）
+        if algo_type_str == "1" and "1" in system_state.detectors:
+            system_state.detectors["1"].set_fence_from_points(camera_id, fence_polygon)
+
+        # 启动检测流
+        config = system_state.config
+        stream_config = StreamConfig(
+            camera_id=camera_id,
+            rtsp_url=rtsp_url,
+            ip_address="",
+            algorithm_types={algo_type_str},
+            fps=config.stream.fps,
+            skip_frames=config.stream.skip_frames,
+            max_reconnect=config.stream.max_reconnect,
+            pre_buffer_seconds=config.stream.pre_buffer_seconds,
+            enable_display=False
+        )
+
+        success = system_state.stream_manager.add_stream(stream_config)
+        if not success:
+            return jsonify({"status": "error", "message": "启动检测流失败"}), 500
+
+        # 启动画框进程
+        p = Process(target=fence_worker, args=(camera_id, rtsp_url, fence_polygon), daemon=True)
+        p.start()
+
+        system_state.active_fence_streams[camera_id] = {
+            "process": p,
+            "url": rtsp_url,
+            "algorithm_type": algo_type_str,
+            "fence_area": fence_polygon
+        }
+        system_state.fence_dict[camera_id] = fence_polygon
+
+    output_url = f"rtsp://192.168.1.61:554/Streaming/Channels/{camera_id}"
+    print(f"[Webhook] 已{'更新' if fence_area else '添加'}摄像头 {camera_id}, 算法={algo_type_str}")
+
+    return jsonify({
+        "status": "success",
+        "action": "add" if fence_area else "update",
+        "camera_id": camera_id,
+        "algorithm_type": algo_type_str,
+        "output_url": output_url
+    })
+
+
+@app.route("/camera/batch_sync", methods=["POST"])
+def camera_batch_sync():
+    """
+    批量同步摄像头列表 - 用于首次启动或全量同步
+
+    Request Body:
+    {
+        "cameras": [
+            {"cam_id": "1", "url": "rtsp://...", "algorithmType": 1, ...},
+            {"cam_id": "2", "url": "rtsp://...", "algorithmType": 2, ...}
+        ],
+        "remove_others": true  // 是否删除列表外的摄像头
+    }
+    """
+    data = request.get_json() or {}
+    cameras = data.get("cameras", [])
+    remove_others = data.get("remove_others", False)
+
+    if not isinstance(cameras, list):
+        return jsonify({"status": "error", "message": "cameras必须是数组"}), 400
+
+    results = {"added": [], "updated": [], "removed": [], "failed": []}
+    current_ids = set()
+
+    for cam in cameras:
+        cam_id = str(cam.get("cam_id", ""))
+        if not cam_id:
+            continue
+        current_ids.add(cam_id)
+
+        try:
+            # 判断是新增还是更新
+            action = "updated" if cam_id in system_state.active_fence_streams else "added"
+
+            resp = _start_camera_detection(
+                camera_id=cam_id,
+                rtsp_url=cam.get("url"),
+                algorithm_type=cam.get("algorithmType"),
+                fence_area=cam.get("fence_area"),
+                default_area=cam.get("default_area", {"width": 960, "height": 540})
+            )
+
+            if resp[1] == 200 or (isinstance(resp, tuple) and resp[1] in (200,)):
+                results[action].append(cam_id)
+            else:
+                results["failed"].append({"cam_id": cam_id, "error": resp[0].get("message", "unknown")})
+        except Exception as e:
+            results["failed"].append({"cam_id": cam_id, "error": str(e)})
+
+    # 清理不在列表中的摄像头
+    if remove_others:
+        with system_state.lock:
+            all_active = list(system_state.active_fence_streams.keys())
+        for cam_id in all_active:
+            if cam_id not in current_ids:
+                _remove_camera(cam_id, silent=True)
+                results["removed"].append(cam_id)
+
+    return jsonify({
+        "status": "success",
+        "summary": {
+            "total": len(cameras),
+            "added": len(results["added"]),
+            "updated": len(results["updated"]),
+            "removed": len(results["removed"]),
+            "failed": len(results["failed"])
+        },
+        "details": results
+    })
+
+
+# =========================
 # 信号处理 - 确保能立即退出
 # =========================
 def force_exit(signum, frame):
@@ -766,6 +920,67 @@ signal.signal(signal.SIGTERM, force_exit)  # kill
 
 
 # =========================
+# 启动时加载摄像头列表（可选）
+# =========================
+def bootstrap_cameras_from_api(api_url: str = None):
+    """
+    启动时从API加载摄像头列表
+    如果需要此功能，在main()中调用
+    """
+    api_url = api_url or "http://172.21.3.141:8080/aks-mkaqjcyj/cameraMonitoring/selectSxtInfo"
+
+    try:
+        print(f"[Bootstrap] 正在从API加载摄像头列表...")
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(api_url, headers=headers, timeout=10)
+
+        if resp.status_code != 200:
+            print(f"[Bootstrap] API请求失败: {resp.status_code}")
+            return
+
+        data = resp.json()
+        cameras_data = data.get("data", [])
+        print(f"[Bootstrap] API返回 {len(cameras_data)} 个摄像头配置")
+
+        loaded = 0
+        for item in cameras_data:
+            try:
+                camera_id = str(item.get("id"))
+                rtsp_url = item.get("originalRtsp")
+                algo_types = item.get("algorithmtypes", "")
+
+                if not all([camera_id, rtsp_url, algo_types]):
+                    continue
+
+                # 解析算法类型，取第一个
+                algo_list = [int(x.strip()) for x in algo_types.split(",") if x.strip().isdigit()]
+                if not algo_list:
+                    continue
+
+                # 暂时只支持单算法，取第一个
+                algorithm_type = algo_list[0]
+
+                # 使用全画面检测（不设置围栏）
+                _start_camera_detection(
+                    camera_id=camera_id,
+                    rtsp_url=rtsp_url,
+                    algorithm_type=algorithm_type,
+                    fence_area=None,  # 全画面检测
+                    default_area={"width": 960, "height": 540}
+                )
+                loaded += 1
+
+            except Exception as e:
+                print(f"[Bootstrap] 加载摄像头失败: {e}")
+                continue
+
+        print(f"[Bootstrap] 成功加载 {loaded} 个摄像头")
+
+    except Exception as e:
+        print(f"[Bootstrap] 加载失败: {e}")
+
+
+# =========================
 # 主程序
 # =========================
 def main():
@@ -775,15 +990,21 @@ def main():
     system_state.stream_manager = stream_manager
     system_state.detectors = detectors
 
+    # 可选：启动时从API加载摄像头列表
+    # 如果需要全画面检测（不画围栏），取消下面注释
+    # bootstrap_cameras_from_api()
+
     # 启动Flask服务
     config = system_state.config
     port = 5005
 
     print(f"[Main] Starting API server on port {port}")
     print(f"[Main] API endpoints:")
-    print(f"  - POST http://0.0.0.0:{port}/set_fence")
-    print(f"  - POST http://0.0.0.0:{port}/delete_stream")
-    print(f"  - GET  http://0.0.0.0:{port}/status")
+    print(f"  - POST http://0.0.0.0:{port}/set_fence      (设置围栏并开始检测)")
+    print(f"  - POST http://0.0.0.0:{port}/delete_stream  (停止检测)")
+    print(f"  - GET  http://0.0.0.0:{port}/status         (获取状态)")
+    print(f"  - POST http://0.0.0.0:{port}/camera/webhook (实时推送变更)")
+    print(f"  - POST http://0.0.0.0:{port}/camera/batch_sync (批量同步)")
     print("=" * 60)
 
     # 使用多线程模式支持并发请求
